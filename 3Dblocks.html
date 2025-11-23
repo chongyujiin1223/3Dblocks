@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 积木拼图</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+        #canvas-container { width: 100vw; height: 100vh; display: block; }
+        
+        /* UI Overlay */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        #header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .panel {
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(5px);
+            padding: 15px 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            pointer-events: auto;
+            border: 1px solid #ddd;
+        }
+
+        h1 { margin: 0 0 5px 0; font-size: 24px; color: #333; }
+        p { margin: 5px 0; color: #666; font-size: 14px; }
+        
+        .controls-hint {
+            font-size: 13px;
+            line-height: 1.6;
+            margin-top: 5px;
+        }
+        
+        .key {
+            background: #eee;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-weight: bold;
+            font-family: monospace;
+            color: #333;
+        }
+
+        #level-controls {
+            text-align: right;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 10px;
+        }
+
+        select#level-select {
+            padding: 8px 12px;
+            font-size: 16px;
+            border-radius: 6px;
+            border: 1px solid #ccc;
+            background: #fff;
+            cursor: pointer;
+            outline: none;
+            font-weight: bold;
+            color: #333;
+            min-width: 180px;
+        }
+        select#level-select:hover { border-color: #888; }
+        
+        button {
+            background: #222;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #444; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+
+        #win-modal {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            text-align: center;
+            display: none;
+            pointer-events: auto;
+            z-index: 100;
+        }
+        #win-modal h2 { margin-top: 0; color: #4CAF50; font-size: 32px; }
+        
+        #progress-bar {
+            width: 150px;
+            height: 6px;
+            background: #eee;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        #progress-fill {
+            height: 100%;
+            width: 0%;
+            background: #4CAF50;
+            transition: width 0.3s;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container"></div>
+
+    <div id="ui-layer">
+        <div id="header">
+            <div class="panel">
+                <h1>3D 积木拼图</h1>
+                <div class="controls-hint">
+                    <div><span class="key">左键拖拽</span> 水平移动</div>
+                    <div><span class="key">Shift</span> + <span class="key">左键</span> 垂直升降</div>
+                    <div><span class="key">R</span> 水平旋转 (Y轴)</div>
+                    <div><span class="key">E</span> 翻滚 (X轴)</div>
+                    <div><span class="key">Q</span> 侧翻 (Z轴)</div>
+                    <div><span class="key">右键</span> 旋转视角</div>
+                    <div><span class="key">滚轮</span> 缩放视角</div>
+                </div>
+            </div>
+            <div class="panel" id="level-controls">
+                <select id="level-select"></select>
+                <div id="progress-bar"><div id="progress-fill"></div></div>
+                <button id="reset-btn">重置本关</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="win-modal">
+        <h2>🎉 挑战成功!</h2>
+        <p>结构完美契合。</p>
+        <button id="next-level-btn">下一关</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- 游戏配置 ---
+        const CONFIG = {
+            gridSize: 1.0, 
+            // 移动边界范围
+            bounds: {
+                xMin: -25, xMax: 25,
+                yMin: 0,   yMax: 20,
+                zMin: -25, zMax: 25
+            },
+            colors: [
+                0xE57373, 0x64B5F6, 0x81C784, 0xFFD54F, 0xBA68C8, 0xFF8A65, 
+                0x4DD0E1, 0xAED581, 0xFFB74D, 0x9575CD, 0x7986CB, 0x4DB6AC,
+                0x8D6E63, 0x90A4AE, 0xF06292
+            ]
+        };
+
+        let scene, camera, renderer;
+        let pieces = []; 
+        let targetArea = null; 
+        let targetVoxels = new Set(); 
+        
+        let draggedObject = null;
+        let isDragging = false;
+        let isShiftDown = false;
+        
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const dragPlane = new THREE.Plane();
+        const intersection = new THREE.Vector3();
+        const offset = new THREE.Vector3();
+
+        let currentLevelIndex = 0;
+        let isRotating = false;
+        let lastMouseX = 0, lastMouseY = 0;
+        let theta = Math.PI / 4, phi = Math.PI / 3, radius = 35;
+
+        // --- 关卡定义工具 ---
+        function defineLevel(name, solutionPieces) {
+            const target = [];
+            const pieces = [];
+            
+            solutionPieces.forEach((voxels, index) => {
+                target.push(...voxels);
+                // 归一化积木坐标
+                let minX = Infinity, minY = Infinity, minZ = Infinity;
+                voxels.forEach(v => {
+                    if(v[0] < minX) minX = v[0];
+                    if(v[1] < minY) minY = v[1];
+                    if(v[2] < minZ) minZ = v[2];
+                });
+                const shape = voxels.map(v => [v[0]-minX, v[1]-minY, v[2]-minZ]);
+                pieces.push({ shape: shape, color: index });
+            });
+            return { name, target, pieces };
+        }
+
+        // --- 全新高难度关卡设计 (20关) ---
+        const LEVELS = [
+            // --- 阶段一：立体思维觉醒 (1-10) ---
+            
+            defineLevel("1. 立体角柱", [
+                [[0,0,0], [1,0,0], [0,1,0], [0,0,1]], // 4格三角架
+                [[1,1,1], [0,1,1], [1,0,1], [1,1,0]]  // 对角线对称块 (4格)
+            ]),
+            
+            defineLevel("2. 鲁班锁基础", [
+                [[1,0,0], [1,1,0], [1,2,0], [0,1,0], [2,1,0]], // 十字加长 (5格)
+                [[1,1,1], [1,1,2], [0,1,1], [2,1,1], [1,0,1]], // 插入件 (5格)
+                [[0,0,0], [0,0,1], [2,0,0], [2,0,1], [1,0,1]]  // 底部支撑 (5格)
+            ]),
+
+            defineLevel("3. 3D L型对拼", [
+                [[0,0,0], [1,0,0], [0,1,0], [0,0,1], [1,0,1]], // 5格
+                [[1,1,1], [0,1,1], [1,0,1], [1,1,0], [0,1,0]]  // 5格
+            ]),
+
+            defineLevel("4. 井字塔", [
+                [[0,0,0], [2,0,0], [0,2,0], [2,2,0], [1,1,0]], // 5格：四角底+中心
+                [[0,0,1], [2,0,1], [0,2,1], [2,2,1], [1,1,1]], // 5格：第二层结构
+                [[0,0,2], [2,0,2], [0,2,2], [2,2,2], [1,1,2]], // 5格：顶层
+                [[1,0,0], [0,1,0], [2,1,0], [1,2,0], [1,0,1], [0,1,1]] // 填充缝隙 (6格)
+            ]),
+
+            defineLevel("5. 蛇形缠绕", [
+                [[0,0,0], [1,0,0], [1,1,0], [1,1,1], [2,1,1]], // 5格 3D蛇
+                [[0,0,1], [0,1,1], [0,1,0], [0,2,0], [1,2,0]], // 5格 3D蛇
+                [[2,0,0], [2,0,1], [2,1,0], [2,2,1], [1,2,1]]  // 5格
+            ]),
+
+            defineLevel("6. 凹凸魔方 (3x3x3)", [
+                [[0,0,0], [1,0,0], [0,1,0], [0,0,1], [1,1,0]], // 5格角块
+                [[2,2,2], [1,2,2], [2,1,2], [2,2,1], [1,1,2]], // 5格对角块
+                [[0,2,0], [1,2,0], [0,2,1], [0,1,1], [1,1,1]], // 5格
+                [[2,0,2], [1,0,2], [2,0,1], [2,1,1], [1,0,1]], // 5格
+                [[2,0,0], [2,1,0], [2,2,0], [1,2,1], [1,0,0], [0,1,2], [0,2,2]] // 7格核心填充
+            ]),
+
+            defineLevel("7. 工业支架", [
+                [[0,0,0], [0,1,0], [0,2,0], [1,0,0], [2,0,0]], // 5格 L型大支架
+                [[2,2,0], [2,1,0], [1,2,0], [0,2,1], [0,2,2]], // 5格 顶部悬臂
+                [[2,0,2], [2,0,1], [2,1,2], [1,0,2], [0,0,2]], // 5格 底部另一侧
+                [[1,1,1], [1,1,0], [1,1,2], [0,1,1], [2,1,1]]  // 5格 十字核心
+            ]),
+
+            defineLevel("8. 3D 俄罗斯方块墙", [
+                [[0,0,0], [1,0,0], [1,1,0], [2,1,0], [1,1,1]], // 5格 T型变种
+                [[0,1,0], [0,2,0], [1,2,0], [0,1,1], [0,2,1]], // 5格 L型变种
+                [[2,0,0], [2,0,1], [1,0,1], [1,0,2], [2,0,2]], // 5格 S型变种
+                [[2,2,0], [2,2,1], [1,2,1], [2,1,1], [2,1,2]]  // 5格
+            ]),
+
+            defineLevel("9. 空心立方体", [
+                [[0,0,0], [1,0,0], [2,0,0], [0,1,0], [0,2,0]], // 5格 面1
+                [[0,0,1], [0,0,2], [1,0,2], [2,0,2], [2,0,1]], // 5格 面2
+                [[2,1,2], [2,2,2], [1,2,2], [0,2,2], [0,2,1]], // 5格 面3
+                [[2,2,1], [2,2,0], [1,2,0], [2,1,0], [2,1,1]]  // 5格 面4
+            ]),
+
+            defineLevel("10. 螺旋阶梯", [
+                [[0,0,0], [1,0,0], [1,0,1], [0,0,1], [0,1,1]], // 5格 底座+上台阶
+                [[0,2,2], [1,2,2], [1,2,1], [0,2,1], [1,1,1]], // 5格 顶部+下台阶
+                [[2,0,0], [2,1,0], [2,2,0], [2,2,1], [2,1,1]], // 5格 侧柱
+                [[0,1,0], [1,1,0], [2,1,0], [2,0,1], [2,0,2]]  // 5格 连接件
+            ]),
+
+            // --- 阶段二：巨构建筑 (11-20) ---
+            // 规则：至少2个组件 >= 8格。
+
+            defineLevel("11. 巨石阵基座", [
+                [[0,0,0], [1,0,0], [2,0,0], [3,0,0], [0,1,0], [3,1,0], [0,0,1], [3,0,1]], // 8格
+                [[0,0,2], [1,0,2], [2,0,2], [3,0,2], [0,1,2], [3,1,2], [0,0,3], [3,0,3]], // 8格
+                [[1,1,0], [2,1,0], [1,1,2], [2,1,2]], // 4格
+                [[1,2,1], [2,2,1], [1,2,0], [2,2,0], [1,2,2], [2,2,2]] // 6格
+            ]),
+
+            defineLevel("12. 现代摩天楼", [
+                [[0,0,0], [1,0,0], [0,1,0], [1,1,0], [0,2,0], [1,2,0], [0,3,0], [1,3,0]], // 8格
+                [[2,0,0], [2,1,0], [2,2,0], [2,0,1], [2,1,1], [2,2,1], [2,0,2], [2,1,2]], // 8格
+                [[0,0,1], [1,0,1], [0,1,1], [1,1,1], [0,0,2], [1,0,2]], // 6格
+                [[0,2,1], [1,2,1], [0,3,1], [1,3,1], [0,2,2], [1,2,2]]  // 6格
+            ]),
+
+            defineLevel("13. 4x4x4 巨型立方核心", [
+                [[0,0,0], [1,0,0], [0,1,0], [1,1,0], [0,0,1], [1,0,1], [0,1,1], [1,1,1]], // 8格
+                [[2,2,2], [3,2,2], [2,3,2], [3,3,2], [2,2,3], [3,2,3], [2,3,3], [3,3,3]], // 8格
+                [[2,0,0], [3,0,0], [2,1,0], [3,1,0], [2,0,1], [3,0,1]], // 6格
+                [[0,2,0], [1,2,0], [0,3,0], [1,3,0], [0,2,1], [1,2,1]], // 6格
+                [[0,0,2], [1,0,2], [0,1,2], [1,1,2], [0,0,3], [1,0,3]], // 6格
+                [[2,2,0], [3,2,0], [2,3,0], [3,3,0], [2,1,1], [3,1,1]], // 6格
+                [[2,0,2], [3,0,2], [2,1,2], [3,1,2], [2,0,3], [3,0,3]], // 6格
+                [[0,2,2], [1,2,2], [0,3,2], [1,3,2], [0,2,3], [1,2,3]], // 6格
+                [[1,1,2], [1,2,2], [2,1,2], [2,2,1], [1,2,1], [1,1,1]]  // 6格
+            ]),
+
+            defineLevel("14. 凯旋门 (加厚版)", [
+                [[0,0,0], [1,0,0], [0,1,0], [1,1,0], [0,2,0], [1,2,0], [0,3,0], [1,3,0]], // 8格
+                [[3,0,0], [4,0,0], [3,1,0], [4,1,0], [3,2,0], [4,2,0], [3,3,0], [4,3,0]], // 8格
+                [[0,4,0], [1,4,0], [2,4,0], [3,4,0], [4,4,0], [2,3,0]], // 6格
+                [[0,4,1], [1,4,1], [2,4,1], [3,4,1], [4,4,1], [2,3,1]], // 6格
+                [[0,0,1], [1,0,1], [0,1,1], [1,1,1]], // 4格
+                [[3,0,1], [4,0,1], [3,1,1], [4,1,1]]  // 4格
+            ]),
+
+            defineLevel("15. 十字要塞", [
+                [[1,0,0], [1,1,0], [1,2,0], [1,3,0], [1,4,0], [1,2,1], [1,2,2], [1,2,-1]], // 8格
+                [[1,0,1], [1,1,1], [1,2,1], [1,3,1], [1,4,1], [1,2,2], [1,2,3], [1,2,0]], // 8格
+                [[0,2,1], [2,2,1], [0,2,2], [2,2,2], [0,2,0], [2,2,0]], // 6格
+                [[0,0,1], [2,0,1], [0,4,1], [2,4,1], [0,0,2]], // 5格
+                [[0,1,1], [2,1,1], [0,3,1], [2,3,1]] // 4格
+            ]),
+
+            defineLevel("16. 金字塔构造", [
+                [[0,0,0], [1,0,0], [2,0,0], [3,0,0], [0,1,0], [0,2,0], [0,3,0], [1,1,0]], // 8格
+                [[3,1,0], [3,2,0], [3,3,0], [2,3,0], [1,3,0], [2,2,0], [2,1,0], [1,2,0]], // 8格
+                [[1,1,1], [2,1,1], [1,2,1], [2,2,1], [1,1,2]], // 5格
+                [[1,2,2], [2,2,2], [2,1,2], [1,1,3]] // 4格 (含塔尖)
+            ]),
+
+            defineLevel("17. 3D 环形扣", [
+                [[0,0,0], [1,0,0], [2,0,0], [3,0,0], [3,0,1], [3,0,2], [2,0,2], [1,0,2]], // 8格
+                [[0,2,0], [1,2,0], [2,2,0], [3,2,0], [0,2,1], [0,2,2], [1,2,2], [2,2,2]], // 8格
+                [[0,0,1], [0,0,2], [0,1,2], [0,1,0], [0,1,1]], // 5格
+                [[3,1,0], [3,1,1], [3,1,2], [3,2,1], [3,2,2]]  // 5格
+            ]),
+
+            defineLevel("18. 机械之心", [
+                [[1,1,1], [2,1,1], [1,2,1], [2,2,1], [1,1,2], [2,1,2], [1,2,2], [2,2,2]], // 8格
+                [[1,0,1], [2,0,1], [1,0,2], [2,0,2], [0,1,1], [0,2,1], [0,1,2], [0,2,2]], // 8格
+                [[1,3,1], [2,3,1], [1,3,2], [2,3,2], [3,1,1], [3,2,1], [3,1,2], [3,2,2]], // 8格
+                [[1,1,0], [2,1,0], [1,2,0], [2,2,0], [1,1,3], [2,1,3], [1,2,3], [2,2,3]]  // 8格
+            ]),
+
+            defineLevel("19. 莫比乌斯阶梯", [
+                [[0,0,0], [1,0,0], [2,0,0], [2,0,1], [2,0,2], [2,1,2], [2,2,2], [1,2,2]], // 8格
+                [[0,2,2], [0,2,1], [0,2,0], [0,1,0], [0,0,2], [1,0,2], [1,1,2], [1,2,1]], // 8格
+                [[0,0,1], [0,1,1], [1,0,1], [1,1,1]], // 4格
+                [[1,1,0], [2,1,0], [2,1,1], [2,2,0], [2,2,1], [1,2,0]] // 6格
+            ]),
+
+            defineLevel("20. 终极神殿", [
+                [[0,0,0], [1,0,0], [2,0,0], [3,0,0], [4,0,0], [0,0,1], [4,0,1], [0,0,2]], // 8格
+                [[4,0,2], [0,0,3], [4,0,3], [0,0,4], [1,0,4], [2,0,4], [3,0,4], [4,0,4]], // 8格
+                [[1,0,1], [1,1,1], [1,2,1], [1,3,1], [1,0,2]], // 5格
+                [[3,0,1], [3,1,1], [3,2,1], [3,3,1], [3,0,2]], // 5格
+                [[1,0,3], [1,1,3], [1,2,3], [1,3,3], [2,0,3]], // 5格
+                [[3,0,3], [3,1,3], [3,2,3], [3,3,3], [2,0,3]], // 5格
+                [[0,4,0], [1,4,1], [2,4,2], [3,4,3], [4,4,4], [2,5,2]], // 6格
+                [[4,4,0], [3,4,1], [1,4,3], [0,4,4], [2,4,0], [2,4,4]]  // 6格
+            ])
+        ];
+
+        // --- 初始化系统 ---
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xffffff); 
+            scene.fog = new THREE.Fog(0xffffff, 10, 80);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            // 优化1: 设置像素比
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            // 灯光
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(20, 30, 20); 
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            dirLight.shadow.camera.left = -25;
+            dirLight.shadow.camera.right = 25;
+            dirLight.shadow.camera.top = 25;
+            dirLight.shadow.camera.bottom = -25;
+            scene.add(dirLight);
+
+            // 地面网格
+            const gridHelper = new THREE.GridHelper(60, 60, 0xdddddd, 0xeeeeee);
+            gridHelper.position.set(0.5, -0.5, 0.5); 
+            scene.add(gridHelper);
+
+            // 初始化关卡选择器
+            const levelSelect = document.getElementById('level-select');
+            LEVELS.forEach((level, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.text = level.name;
+                levelSelect.appendChild(option);
+            });
+            // 优化3: 修复下拉菜单选择问题
+            // 这里其实不需要额外修改逻辑，核心是解决 mousedown 的拦截问题
+            levelSelect.addEventListener('change', (e) => {
+                loadLevel(parseInt(e.target.value));
+                // 移除焦点，防止后续按键操作干扰下拉框
+                levelSelect.blur();
+            });
+
+            // 事件监听
+            window.addEventListener('resize', onWindowResize, false);
+            
+            // 优化3: 将交互事件绑定到 canvas 而不是 document，避免拦截 UI 点击
+            renderer.domElement.addEventListener('mousedown', onMouseDown, false);
+            renderer.domElement.addEventListener('wheel', onMouseWheel, false);
+            renderer.domElement.addEventListener('contextmenu', event => event.preventDefault());
+
+            // mousemove 和 mouseup 仍建议在 window/document 上，保证拖拽出画面不丢失
+            document.addEventListener('mousemove', onMouseMove, false);
+            document.addEventListener('mouseup', onMouseUp, false);
+            
+            document.addEventListener('keydown', onKeyDown, false);
+            document.addEventListener('keyup', onKeyUp, false);
+
+            document.getElementById('reset-btn').addEventListener('click', () => loadLevel(currentLevelIndex));
+            document.getElementById('next-level-btn').addEventListener('click', nextLevel);
+
+            updateCamera();
+            loadLevel(0); 
+            animate();
+        }
+
+        function loadLevel(index) {
+            if (index < 0 || index >= LEVELS.length) index = 0;
+            document.getElementById('win-modal').style.display = 'none';
+            document.getElementById('next-level-btn').disabled = false;
+
+            if(targetArea) scene.remove(targetArea);
+            pieces.forEach(p => scene.remove(p));
+            pieces = [];
+            targetVoxels.clear();
+
+            currentLevelIndex = index;
+            document.getElementById('level-select').value = index;
+            const levelData = LEVELS[index];
+            document.getElementById('progress-fill').style.width = '0%';
+
+            // 1. 构建目标线框
+            const bounds = getBounds(levelData.target);
+            const centerOffset = new THREE.Vector3(
+                -(bounds.max.x + bounds.min.x) / 2,
+                0, 
+                -(bounds.max.z + bounds.min.z) / 2
+            );
+
+            levelData.target.forEach(pos => {
+                const wx = Math.round(pos[0] + centerOffset.x);
+                const wy = Math.round(pos[1] + centerOffset.y);
+                const wz = Math.round(pos[2] + centerOffset.z);
+                targetVoxels.add(`${wx},${wy},${wz}`);
+            });
+
+            const targetGroup = new THREE.Group();
+            
+            // 共享材质和几何体
+            const geometry = new THREE.BoxGeometry(CONFIG.gridSize, CONFIG.gridSize, CONFIG.gridSize);
+            const edges = new THREE.EdgesGeometry(geometry);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6 });
+            const fillMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.08, depthWrite: false });
+            
+            levelData.target.forEach(v => {
+                const line = new THREE.LineSegments(edges, lineMat);
+                line.position.set(v[0], v[1], v[2]);
+                targetGroup.add(line);
+                
+                const mesh = new THREE.Mesh(geometry, fillMat);
+                mesh.position.set(v[0], v[1], v[2]);
+                mesh.scale.setScalar(0.99); 
+                targetGroup.add(mesh);
+            });
+            
+            targetArea = targetGroup;
+            targetArea.position.copy(centerOffset);
+            targetArea.position.x = Math.round(targetArea.position.x);
+            targetArea.position.y = Math.round(targetArea.position.y);
+            targetArea.position.z = Math.round(targetArea.position.z);
+            scene.add(targetArea);
+
+            // 2. 生成积木
+            levelData.pieces.forEach((pData, i) => {
+                const pieceGroup = createPieceGroup(pData.shape, CONFIG.colors[pData.color % CONFIG.colors.length]);
+                
+                const angle = (i / levelData.pieces.length) * Math.PI * 2;
+                const r = 12 + Math.random() * 6; 
+                const startX = Math.round(Math.cos(angle) * r);
+                const startZ = Math.round(Math.sin(angle) * r);
+
+                pieceGroup.position.set(startX, 1, startZ);
+                snapToGrid(pieceGroup);
+
+                // 随机旋转
+                const rotY = Math.floor(Math.random() * 4);
+                const rotX = Math.floor(Math.random() * 4);
+                const rotZ = Math.floor(Math.random() * 4);
+                pieceGroup.rotation.set(rotX * (Math.PI/2), rotY * (Math.PI/2), rotZ * (Math.PI/2));
+                
+                pieceGroup.updateMatrixWorld();
+                snapToGrid(pieceGroup);
+
+                pieceGroup.userData.originalShape = pData.shape;
+                pieceGroup.userData.id = i;
+
+                scene.add(pieceGroup);
+                pieces.push(pieceGroup);
+            });
+        }
+
+        function createPieceGroup(shape, colorHex) {
+            const group = new THREE.Group();
+            const material = new THREE.MeshLambertMaterial({ 
+                color: colorHex, opacity: 0.95, transparent: true
+            });
+            
+            let minX = Infinity, maxX = -Infinity;
+            let minY = Infinity, maxY = -Infinity;
+            let minZ = Infinity, maxZ = -Infinity;
+
+            shape.forEach(v => {
+                minX = Math.min(minX, v[0]); maxX = Math.max(maxX, v[0]);
+                minY = Math.min(minY, v[1]); maxY = Math.max(maxY, v[1]);
+                minZ = Math.min(minZ, v[2]); maxZ = Math.max(maxZ, v[2]);
+            });
+
+            const centerX = (minX + maxX) / 2 + 0.5; 
+            const centerY = (minY + maxY) / 2 + 0.5;
+            const centerZ = (minZ + maxZ) / 2 + 0.5;
+            const center = new THREE.Vector3(centerX, centerY, centerZ);
+            
+            shape.forEach(v => {
+                 const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.96, 0.96, 0.96), material);
+                 mesh.position.set(v[0], v[1], v[2]);
+                 mesh.castShadow = true;
+                 mesh.receiveShadow = true;
+                 group.add(mesh);
+            });
+            
+            group.children.forEach(child => child.position.sub(center));
+            group.userData.centerOffset = center; 
+            return group;
+        }
+
+        function getBounds(voxels) {
+            let min = new THREE.Vector3(Infinity, Infinity, Infinity);
+            let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+            voxels.forEach(v => {
+                min.x = Math.min(min.x, v[0]); min.y = Math.min(min.y, v[1]); min.z = Math.min(min.z, v[2]);
+                max.x = Math.max(max.x, v[0]); max.y = Math.max(max.y, v[1]); max.z = Math.max(max.z, v[2]);
+            });
+            return { min, max };
+        }
+
+        function snapToGrid(object) {
+            const centerRaw = object.userData.centerOffset.clone();
+            centerRaw.applyEuler(object.rotation);
+            object.position.x = Math.round(object.position.x - centerRaw.x) + centerRaw.x;
+            object.position.y = Math.round(object.position.y - centerRaw.y) + centerRaw.y;
+            object.position.z = Math.round(object.position.z - centerRaw.z) + centerRaw.z;
+        }
+
+        function onMouseDown(event) {
+            if(event.button !== 0) return;
+            event.preventDefault();
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const intersects = raycaster.intersectObjects(pieces, true);
+            if (intersects.length > 0) {
+                isDragging = true;
+                draggedObject = intersects[0].object.parent; 
+                const normal = isShiftDown ? new THREE.Vector3(camera.position.x, 0, camera.position.z).normalize() : new THREE.Vector3(0, 1, 0);
+                dragPlane.setFromNormalAndCoplanarPoint(normal, draggedObject.position);
+                if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
+                    offset.copy(intersection).sub(draggedObject.position);
+                }
+                setPieceOpacity(draggedObject, 0.7);
+            }
+        }
+        
+        function setPieceOpacity(group, opacity) {
+            group.children.forEach(c => {
+                c.material.opacity = opacity;
+                c.material.emissive.setHex(opacity < 1 ? 0x444444 : 0x000000);
+            });
+        }
+
+        function onMouseMove(event) {
+            event.preventDefault();
+            if (!isDragging || !draggedObject) return;
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+
+            const normal = isShiftDown ? new THREE.Vector3(camera.position.x, 0, camera.position.z).normalize() : new THREE.Vector3(0, 1, 0);
+            dragPlane.setFromNormalAndCoplanarPoint(normal, draggedObject.position);
+
+            if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
+                let targetPos = intersection.sub(offset);
+                
+                // 优化4: 增加移动边界限制
+                if(isShiftDown) { 
+                    draggedObject.position.y = Math.max(CONFIG.bounds.yMin, Math.min(CONFIG.bounds.yMax, targetPos.y)); 
+                } else { 
+                    draggedObject.position.x = Math.max(CONFIG.bounds.xMin, Math.min(CONFIG.bounds.xMax, targetPos.x));
+                    draggedObject.position.z = Math.max(CONFIG.bounds.zMin, Math.min(CONFIG.bounds.zMax, targetPos.z));
+                }
+            }
+        }
+
+        function onMouseUp(event) {
+            if (isDragging && draggedObject) {
+                snapToGrid(draggedObject);
+                setPieceOpacity(draggedObject, 0.95);
+                checkWin();
+            }
+            isDragging = false;
+            draggedObject = null;
+        }
+
+        function onKeyDown(event) {
+            if (event.key === 'Shift') isShiftDown = true;
+            if (draggedObject) {
+                const key = event.key.toLowerCase();
+                let rotated = false;
+                if (key === 'r') { draggedObject.rotation.y += Math.PI / 2; rotated = true; }
+                else if (key === 'e') { draggedObject.rotation.x += Math.PI / 2; rotated = true; }
+                else if (key === 'q') { draggedObject.rotation.z += Math.PI / 2; rotated = true; }
+                if (rotated) {
+                    draggedObject.updateMatrixWorld();
+                    snapToGrid(draggedObject);
+                    checkWin();
+                }
+            }
+        }
+
+        function onKeyUp(event) { if (event.key === 'Shift') isShiftDown = false; }
+
+        function onMouseWheel(event) {
+            event.preventDefault();
+            radius += event.deltaY * 0.05;
+            radius = Math.max(10, Math.min(80, radius));
+            updateCamera();
+        }
+
+        function checkWin() {
+            let occupiedVoxels = new Set();
+            let overlap = false;
+            let correctCount = 0;
+            const tempVec = new THREE.Vector3();
+
+            pieces.forEach(group => {
+                group.updateMatrixWorld();
+                group.children.forEach(mesh => {
+                    mesh.getWorldPosition(tempVec);
+                    const x = Math.round(tempVec.x);
+                    const y = Math.round(tempVec.y);
+                    const z = Math.round(tempVec.z);
+                    const key = `${x},${y},${z}`;
+                    if (occupiedVoxels.has(key)) overlap = true;
+                    occupiedVoxels.add(key);
+                    if (targetVoxels.has(key)) correctCount++;
+                });
+            });
+
+            const progress = (correctCount / targetVoxels.size) * 100;
+            document.getElementById('progress-fill').style.width = `${Math.min(100, progress)}%`;
+
+            if (!overlap && occupiedVoxels.size === targetVoxels.size && correctCount === targetVoxels.size) {
+                setTimeout(() => {
+                    const modal = document.getElementById('win-modal');
+                    if(modal.style.display !== 'block') {
+                        modal.style.display = 'block';
+                        triggerConfetti();
+                    }
+                }, 200);
+            }
+        }
+
+        function nextLevel() {
+            const btn = document.getElementById('next-level-btn');
+            btn.disabled = true;
+            if (currentLevelIndex < LEVELS.length - 1) { loadLevel(currentLevelIndex + 1); } 
+            else { alert("恭喜！你已通关所有关卡！"); loadLevel(0); }
+        }
+
+        function updateCamera() {
+            if (!camera) return;
+            camera.position.x = radius * Math.sin(theta) * Math.cos(phi);
+            camera.position.y = radius * Math.sin(phi);
+            camera.position.z = radius * Math.cos(theta) * Math.cos(phi);
+            camera.lookAt(0, 0, 0);
+        }
+
+        // document.addEventListener('contextmenu', event => event.preventDefault()); 
+        // 移至 init() 中绑定到 canvas
+
+        document.addEventListener('mousedown', e => {
+            // 此处监听仅用于旋转视角逻辑（右键），仍需在 document 上以防甩出 canvas
+             if(e.button === 2) { isRotating = true; lastMouseX = e.clientX; lastMouseY = e.clientY; }
+        });
+
+        document.addEventListener('mousemove', e => {
+            if(isRotating) {
+                const deltaX = e.clientX - lastMouseX;
+                const deltaY = e.clientY - lastMouseY;
+                theta -= deltaX * 0.01;
+                phi += deltaY * 0.01;
+                phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.1, phi));
+                updateCamera();
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            }
+        });
+
+        document.addEventListener('mouseup', () => isRotating = false);
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function triggerConfetti() {
+            const colors = [0xE57373, 0x64B5F6, 0x81C784, 0xFFD54F, 0xBA68C8];
+            for(let i=0; i<100; i++) {
+                const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+                const mat = new THREE.MeshBasicMaterial({ color: colors[Math.floor(Math.random()*colors.length)] });
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.copy(targetArea.position);
+                mesh.position.x += (Math.random() - 0.5) * 8;
+                mesh.position.y += Math.random() * 8 + 4;
+                mesh.position.z += (Math.random() - 0.5) * 8;
+                scene.add(mesh);
+                const animateParticle = () => {
+                    mesh.position.y -= 0.15;
+                    mesh.rotation.x += 0.2;
+                    mesh.rotation.y += 0.2;
+                    if(mesh.position.y > -5) requestAnimationFrame(animateParticle);
+                    else scene.remove(mesh);
+                };
+                animateParticle();
+            }
+        }
+
+        init();
+    </script>
+</body>
+</html>
